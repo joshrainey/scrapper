@@ -314,7 +314,15 @@ with st.sidebar:
     
     # Initialize session state for the text area widget
     if "exclude_paths_textarea" not in st.session_state:
-        st.session_state.exclude_paths_textarea = "/shop/\n/cart/\n/checkout/\n/account/"
+        st.session_state.exclude_paths_textarea = ""
+    
+    def add_paths(new_paths):
+        """Append new paths to existing, avoiding duplicates"""
+        current = st.session_state.exclude_paths_textarea.strip()
+        current_set = set(p.strip() for p in current.split("\n") if p.strip())
+        new_set = set(p.strip() for p in new_paths.split("\n") if p.strip())
+        combined = current_set | new_set  # Union of both sets
+        st.session_state.exclude_paths_textarea = "\n".join(sorted(combined))
     
     # Common exclusion presets - BEFORE the text area
     st.markdown("**Quick add:**")
@@ -322,28 +330,33 @@ with st.sidebar:
     
     with col1:
         if st.button("🛒 E-commerce", use_container_width=True):
-            st.session_state.exclude_paths_textarea = "/shop/\n/cart/\n/checkout/\n/account/\n/product/\n/products/\n/collection/\n/collections/\n/order/\n/wishlist/"
+            add_paths("/shop/\n/cart/\n/checkout/\n/account/\n/product/\n/products/\n/collection/\n/collections/\n/order/\n/wishlist/")
             st.rerun()
     with col2:
         if st.button("🌍 Languages", use_container_width=True):
-            st.session_state.exclude_paths_textarea = "/es/\n/fr/\n/de/\n/it/\n/pt/\n/ja/\n/zh/\n/ko/\n/ru/\n/ar/"
+            add_paths("/es/\n/fr/\n/de/\n/it/\n/pt/\n/ja/\n/zh/\n/ko/\n/ru/\n/ar/")
             st.rerun()
     
     col3, col4 = st.columns(2)
     with col3:
         if st.button("👤 User areas", use_container_width=True):
-            st.session_state.exclude_paths_textarea = "/login/\n/register/\n/account/\n/profile/\n/dashboard/\n/my-account/\n/signin/\n/signup/"
+            add_paths("/login/\n/register/\n/account/\n/profile/\n/dashboard/\n/my-account/\n/signin/\n/signup/")
             st.rerun()
     with col4:
         if st.button("📰 Blog/News", use_container_width=True):
-            st.session_state.exclude_paths_textarea = "/blog/\n/news/\n/articles/\n/posts/\n/tag/\n/category/\n/author/"
+            add_paths("/blog/\n/news/\n/articles/\n/posts/\n/tag/\n/category/\n/author/")
             st.rerun()
+    
+    # Clear button
+    if st.button("🗑️ Clear all", use_container_width=True):
+        st.session_state.exclude_paths_textarea = ""
+        st.rerun()
     
     # Text area - uses key only, no value parameter
     exclude_paths_input = st.text_area(
         "Directories to skip (one per line)",
-        height=120,
-        help="URLs containing these paths will be skipped",
+        height=150,
+        help="URLs containing these paths will be skipped. Click buttons above to add common exclusions.",
         key="exclude_paths_textarea"
     )
     
