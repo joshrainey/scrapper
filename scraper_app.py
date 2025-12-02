@@ -312,43 +312,40 @@ with st.sidebar:
     st.markdown("---")
     st.header("🚫 Exclude Paths")
     
-    # Initialize session state for exclude paths
-    if "exclude_paths_value" not in st.session_state:
-        st.session_state.exclude_paths_value = "/shop/\n/cart/\n/checkout/\n/account/"
+    # Initialize session state for the text area widget
+    if "exclude_paths_textarea" not in st.session_state:
+        st.session_state.exclude_paths_textarea = "/shop/\n/cart/\n/checkout/\n/account/"
     
-    # Common exclusion presets
+    # Common exclusion presets - BEFORE the text area
     st.markdown("**Quick add:**")
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("🛒 E-commerce", use_container_width=True):
-            st.session_state.exclude_paths_value = "/shop/\n/cart/\n/checkout/\n/account/\n/product/\n/products/\n/collection/\n/collections/\n/order/\n/wishlist/"
+            st.session_state.exclude_paths_textarea = "/shop/\n/cart/\n/checkout/\n/account/\n/product/\n/products/\n/collection/\n/collections/\n/order/\n/wishlist/"
             st.rerun()
     with col2:
         if st.button("🌍 Languages", use_container_width=True):
-            st.session_state.exclude_paths_value = "/es/\n/fr/\n/de/\n/it/\n/pt/\n/ja/\n/zh/\n/ko/\n/ru/\n/ar/"
+            st.session_state.exclude_paths_textarea = "/es/\n/fr/\n/de/\n/it/\n/pt/\n/ja/\n/zh/\n/ko/\n/ru/\n/ar/"
             st.rerun()
     
     col3, col4 = st.columns(2)
     with col3:
         if st.button("👤 User areas", use_container_width=True):
-            st.session_state.exclude_paths_value = "/login/\n/register/\n/account/\n/profile/\n/dashboard/\n/my-account/\n/signin/\n/signup/"
+            st.session_state.exclude_paths_textarea = "/login/\n/register/\n/account/\n/profile/\n/dashboard/\n/my-account/\n/signin/\n/signup/"
             st.rerun()
     with col4:
         if st.button("📰 Blog/News", use_container_width=True):
-            st.session_state.exclude_paths_value = "/blog/\n/news/\n/articles/\n/posts/\n/tag/\n/category/\n/author/"
+            st.session_state.exclude_paths_textarea = "/blog/\n/news/\n/articles/\n/posts/\n/tag/\n/category/\n/author/"
             st.rerun()
     
+    # Text area - uses key only, no value parameter
     exclude_paths_input = st.text_area(
         "Directories to skip (one per line)",
-        value=st.session_state.exclude_paths_value,
         height=120,
         help="URLs containing these paths will be skipped",
         key="exclude_paths_textarea"
     )
-    
-    # Update session state when user manually edits
-    st.session_state.exclude_paths_value = exclude_paths_input
     
     st.markdown("---")
     st.markdown("**Tips:**")
