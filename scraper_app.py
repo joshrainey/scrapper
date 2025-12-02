@@ -41,12 +41,13 @@ SKIP_EXTENSIONS = {
 
 
 class WebScraper:
-    def __init__(self, base_url, max_pages=100, delay=0.3, respect_robots=True):
+    def __init__(self, base_url, max_pages=100, delay=0.3, respect_robots=True, exclude_paths=None):
         self.base_url = base_url.rstrip("/")
         self.start_url = self.base_url + "/"
         self.max_pages = max_pages
         self.delay = delay
         self.respect_robots = respect_robots
+        self.exclude_paths = exclude_paths or []
         
         self.visited = set()
         self.to_visit = {self.start_url}
@@ -91,6 +92,10 @@ class WebScraper:
         path_lower = parsed.path.lower()
         if any(path_lower.endswith(ext) for ext in SKIP_EXTENSIONS):
             return False
+        # Check excluded paths
+        for exclude in self.exclude_paths:
+            if exclude and exclude.lower() in path_lower:
+                return False
         return True
     
     def _extract_title(self, soup, url):
@@ -305,11 +310,46 @@ with st.sidebar:
     )
     
     st.markdown("---")
+    st.header("🚫 Exclude Paths")
+    
+    exclude_paths_input = st.text_area(
+        "Directories to skip (one per line)",
+        value="/shop/\n/cart/\n/checkout/\n/account/",
+        height=120,
+        help="URLs containing these paths will be skipped"
+    )
+    
+    # Common exclusion presets
+    st.markdown("**Quick add:**")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🛒 E-commerce", use_container_width=True):
+            st.session_state.exclude_preset = "/shop/\n/cart/\n/checkout/\n/account/\n/product/\n/products/\n/collection/\n/collections/\n/order/\n/wishlist/"
+    with col2:
+        if st.button("🌍 Languages", use_container_width=True):
+            st.session_state.exclude_preset = "/es/\n/fr/\n/de/\n/it/\n/pt/\n/ja/\n/zh/\n/ko/\n/ru/\n/ar/"
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        if st.button("👤 User areas", use_container_width=True):
+            st.session_state.exclude_preset = "/login/\n/register/\n/account/\n/profile/\n/dashboard/\n/my-account/\n/signin/\n/signup/"
+    with col4:
+        if st.button("📰 Blog/News", use_container_width=True):
+            st.session_state.exclude_preset = "/blog/\n/news/\n/articles/\n/posts/\n/tag/\n/category/\n/author/"
+    
+    # Apply preset if clicked
+    if "exclude_preset" in st.session_state:
+        exclude_paths_input = st.session_state.exclude_preset
+        del st.session_state.exclude_preset
+        st.rerun()
+    
+    st.markdown("---")
     st.markdown("**Tips:**")
     st.markdown("""
     - Start with a smaller max pages to test
     - Increase delay if you get blocked
-    - Some sites may block scrapers
+    - Use path exclusions to focus on content
     """)
 
 # Main area
@@ -338,11 +378,15 @@ if start_button:
         status_text.text("Initializing...")
         
         try:
+            # Parse excluded paths from text area
+            exclude_paths = [p.strip() for p in exclude_paths_input.strip().split("\n") if p.strip()]
+            
             scraper = WebScraper(
                 base_url=url,
                 max_pages=max_pages,
                 delay=delay,
-                respect_robots=respect_robots
+                respect_robots=respect_robots,
+                exclude_paths=exclude_paths
             )
             
             results = scraper.crawl(progress_bar, status_text, stats_container)
