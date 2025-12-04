@@ -77,10 +77,17 @@ SKIP_EXTENSIONS = {
 
 
 class WebScraper:
-    def __init__(self, base_url, max_pages=100, delay=0.3, respect_robots=True, exclude_paths=None):
+    def __init__(self, base_url, max_pages=100, delay=0.3, respect_robots=True, exclude_paths=None, single_page_mode=False):
         self.base_url = base_url.rstrip("/")
-        self.start_url = self.base_url + "/"
-        self.max_pages = max_pages
+        self.single_page_mode = single_page_mode
+        
+        # In single page mode, use the exact URL provided
+        if single_page_mode:
+            self.start_url = base_url
+        else:
+            self.start_url = self.base_url + "/"
+        
+        self.max_pages = 1 if single_page_mode else max_pages
         self.delay = delay
         self.respect_robots = respect_robots
         self.exclude_paths = exclude_paths or []
@@ -157,28 +164,86 @@ class WebScraper:
         text_lower = text.lower()
         return any(pattern in text_lower for pattern in JUNK_TEXT_PATTERNS)
     
-    def _detect_section_type(self, element):
-        """Detect the type of section based on classes, IDs, and structure"""
+    def _detect_section_type(self, element, is_first=False):
+        """Detect the type of section based on classes, IDs, structure, and position"""
         classes = " ".join(element.get("class", [])).lower()
         elem_id = (element.get("id") or "").lower()
         tag_name = element.name
+        text_content = element.get_text(strip=True)
+        text_lower = text_content.lower()
         
-        # Check against known patterns
+        # Check against known patterns first (class/id based detection)
         for layout_type, patterns in LAYOUT_PATTERNS.items():
-            # Check classes
             if "classes" in patterns:
                 for cls in patterns["classes"]:
                     if cls in classes:
                         return layout_type
-            # Check IDs
             if "ids" in patterns:
                 for id_pattern in patterns["ids"]:
                     if id_pattern in elem_id:
                         return layout_type
-            # Check tags
             if "tags" in patterns:
                 if tag_name in patterns["tags"]:
                     return layout_type
+        
+        # === POSITION HEURISTICS ===
+        
+        # First section with heading/image is likely hero
+        if is_first:
+            has_h1 = element.find("h1") is not None
+            has_large_image = element.find("img") is not None
+            has_bg_style = "background" in (element.get("style") or "").lower()
+            if has_h1 or has_large_image or has_bg_style:
+                return "hero"
+        
+        # === CONTENT HEURISTICS ===
+        
+        # Testimonial: quotes, blockquotes, or attribution patterns
+        has_blockquote = element.find("blockquote") is not None
+        has_quotes = any(q in text_content for q in ['"', '"', '"', '«', '»', "''"])
+        has_citation = element.find("cite") is not None
+        # Attribution patterns: "Name, City" or "- Name" or "— Name, Title"
+        attribution_pattern = re.search(r'[—–-]\s*[A-Z][a-z]+(\s+[A-Z]\.?)?(\s+[A-Z][a-z]+)?,?\s*([\w\s]+,\s*[A-Z]{2})?', text_content)
+        
+        if has_blockquote or has_citation or (has_quotes and attribution_pattern):
+            return "testimonial"
+        
+        # FAQ: multiple questions
+        questions = text_content.count("?")
+        has_details = element.find("details") is not None
+        if questions >= 3 or has_details:
+            return "faq"
+        
+        # Gallery: multiple images (3+)
+        images = element.find_all("img")
+        if len(images) >= 3:
+            return "gallery"
+        
+        # Pricing: dollar signs or price patterns
+        price_pattern = re.search(r'\$\d+|\d+\.\d{2}|/month|/year|per month|per year', text_lower)
+        if price_pattern and ("plan" in text_lower or "price" in text_lower or "tier" in text_lower):
+            return "pricing"
+        
+        # Features/benefits: list with short items, often with icons
+        list_items = element.find_all("li")
+        if len(list_items) >= 3:
+            avg_item_length = sum(len(li.get_text()) for li in list_items) / len(list_items)
+            if avg_item_length < 100:  # Short list items suggest features
+                return "features"
+        
+        # Contact: contact-related keywords
+        contact_keywords = ["email", "phone", "address", "contact us", "get in touch", "reach out"]
+        if any(kw in text_lower for kw in contact_keywords):
+            if element.find("a", href=lambda h: h and ("mailto:" in h or "tel:" in h)):
+                return "contact"
+        
+        # CTA: short section with action words
+        word_count = len(text_content.split())
+        cta_phrases = ["book now", "get started", "sign up", "contact us", "learn more", 
+                       "buy now", "subscribe", "join", "start free", "try free", "call us"]
+        has_cta_text = any(cta in text_lower for cta in cta_phrases)
+        if word_count < 75 and has_cta_text:
+            return "cta"
         
         return None
     
@@ -216,9 +281,9 @@ class WebScraper:
         """Check if element contains an image"""
         return bool(element.find(["img", "picture", "figure", "svg"]))
     
-    def _extract_section_data(self, element, url):
+    def _extract_section_data(self, element, url, is_first=False):
         """Extract structured data from a section"""
-        section_type = self._detect_section_type(element) or "content"
+        section_type = self._detect_section_type(element, is_first=is_first) or "content"
         column_layout = self._detect_column_layout(element)
         has_image = self._has_image(element)
         
@@ -309,13 +374,15 @@ class WebScraper:
         if not section_tags:
             section_tags = [main_content]
         
-        for section_elem in section_tags:
+        for idx, section_elem in enumerate(section_tags):
             # Skip empty or tiny sections
             text_content = section_elem.get_text(strip=True)
             if len(text_content) < 50:
                 continue
             
-            section_data = self._extract_section_data(section_elem, url)
+            # First meaningful section is likely hero
+            is_first_section = (len(sections) == 0)
+            section_data = self._extract_section_data(section_elem, url, is_first=is_first_section)
             
             # Skip junk sections
             if section_data["content"] and not self._is_junk_text(section_data["content"][:200]):
@@ -377,6 +444,9 @@ class WebScraper:
         """Main crawl loop with Streamlit progress updates"""
         self._load_robots_txt()
         
+        if self.single_page_mode:
+            status_text.text(f"🎯 Single page mode: {self.start_url}")
+        
         pages_processed = 0
         
         while self.to_visit and len(self.visited) < self.max_pages:
@@ -424,7 +494,8 @@ class WebScraper:
                 }
             
             new_links = self._extract_links(response.text, url)
-            self.to_visit.update(new_links)
+            if not self.single_page_mode:
+                self.to_visit.update(new_links)
             
             # Update stats
             stats_container.markdown(f"""
@@ -545,17 +616,26 @@ with st.sidebar:
     url = st.text_input(
         "Website URL",
         value="https://example.com",
-        help="Enter the full URL including https://"
+        help="Enter a full URL. Use 'Single page only' to scrape just this page."
     )
     
-    max_pages = st.slider(
-        "Maximum pages",
-        min_value=5,
-        max_value=500,
-        value=50,
-        step=5,
-        help="Limit how many pages to crawl"
+    single_page_mode = st.checkbox(
+        "🎯 Single page only",
+        value=False,
+        help="Scrape only the URL entered, don't follow links"
     )
+    
+    if not single_page_mode:
+        max_pages = st.slider(
+            "Maximum pages",
+            min_value=1,
+            max_value=500,
+            value=50,
+            step=1,
+            help="Limit how many pages to crawl"
+        )
+    else:
+        max_pages = 1
     
     delay = st.slider(
         "Request delay (seconds)",
@@ -635,7 +715,8 @@ with st.sidebar:
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    start_button = st.button("🚀 Start Scraping", type="primary", use_container_width=True)
+    button_label = "🎯 Scrape This Page" if single_page_mode else "🚀 Start Scraping"
+    start_button = st.button(button_label, type="primary", use_container_width=True)
 
 # Initialize session state
 if "results" not in st.session_state:
@@ -665,7 +746,8 @@ if start_button:
                 max_pages=max_pages,
                 delay=delay,
                 respect_robots=respect_robots,
-                exclude_paths=exclude_paths
+                exclude_paths=exclude_paths,
+                single_page_mode=single_page_mode
             )
             
             results = scraper.crawl(progress_bar, status_text, stats_container)
