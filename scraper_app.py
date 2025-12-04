@@ -401,24 +401,25 @@ class WebScraper:
         return title, content, sections
     
     def _extract_sections_by_headings(self, main_content, url):
-        """Extract sections by splitting content at H1 and H2 headings only"""
+        """Extract sections by splitting content at H1 and H2 headings"""
         sections = []
-        seen_content = set()  # Track content hashes to avoid duplicates
+        seen_headings = set()  # Track headings to avoid duplicates
         
-        # Find only H1 and H2 headings (not H3 - those are subsections)
-        major_headings = main_content.find_all(['h1', 'h2'])
+        # Find ALL H1 and H2 headings anywhere in the content (not just direct children)
+        major_headings = main_content.find_all(['h1', 'h2'], recursive=True)
         
         if not major_headings:
-            # No headings found, treat whole thing as one section
             section_data = self._extract_section_data(main_content, url, is_first=True)
             if section_data["content"]:
                 sections.append(section_data)
             return sections
         
-        # Process each major heading
+        # Get the full HTML and find heading positions
+        full_html = str(main_content)
+        
         for i, heading in enumerate(major_headings):
             heading_text = heading.get_text(strip=True)
-            heading_level = int(heading.name[1])
+            heading_html = str(heading)
             
             # Skip empty, very short, or junk headings
             if not heading_text or len(heading_text) < 3:
@@ -428,72 +429,48 @@ class WebScraper:
             # Skip button-like headings
             if heading_text.startswith('[') and heading_text.endswith(']'):
                 continue
+            # Skip duplicates
+            heading_key = heading_text.lower().strip()[:50]
+            if heading_key in seen_headings:
+                continue
+            seen_headings.add(heading_key)
             
-            # Find the parent container for this heading
-            # Google Sites wraps sections in nested divs
+            # Find next heading to know where this section ends
+            next_heading = major_headings[i + 1] if i + 1 < len(major_headings) else None
+            
+            # Extract content for this section
+            # Strategy: get content from heading's parent container
             section_container = heading.parent
             
-            # Walk up to find a meaningful container
-            while section_container and section_container.name not in ['section', 'article', 'body']:
+            # Walk up to find a container that has meaningful content
+            while section_container:
+                container_text = section_container.get_text(strip=True)
+                # Stop if container has enough content
+                if len(container_text) > len(heading_text) + 50:
+                    break
                 parent = section_container.parent
-                if parent and parent.name == 'div':
-                    # Check if this div has siblings that might be other sections
-                    siblings = [s for s in parent.children if hasattr(s, 'name') and s.name]
-                    if len(siblings) > 1:
-                        break  # This is likely the section container
+                if parent and parent.name not in ['body', 'html', '[document]']:
                     section_container = parent
                 else:
                     break
             
-            # Get content from this heading to the next major heading
-            section_html_parts = [str(heading)]
+            # Get section content
+            if section_container:
+                section_html = str(section_container)
+            else:
+                section_html = heading_html
             
-            # Collect following siblings
-            current = heading.find_next_sibling()
-            next_heading = major_headings[i + 1] if i + 1 < len(major_headings) else None
+            # If next heading exists, try to truncate content at that point
+            if next_heading:
+                next_heading_text = next_heading.get_text(strip=True)
+                # Find where next heading appears and truncate
+                next_heading_html = str(next_heading)
+                if next_heading_html in section_html:
+                    idx = section_html.find(next_heading_html)
+                    if idx > 0:
+                        section_html = section_html[:idx]
             
-            while current:
-                # Stop if we hit the next major heading
-                if next_heading:
-                    if current == next_heading:
-                        break
-                    if hasattr(current, 'find') and current.find(next_heading):
-                        break
-                
-                # Stop if we hit another H1 or H2
-                if hasattr(current, 'name') and current.name in ['h1', 'h2']:
-                    break
-                
-                section_html_parts.append(str(current))
-                current = current.find_next_sibling()
-                
-                # Limit to prevent runaway
-                if len(section_html_parts) > 30:
-                    break
-            
-            # If we didn't get much from siblings, try getting content from parent container
-            if len(section_html_parts) <= 2:
-                # Get all content under the container until next heading
-                if section_container and section_container != heading:
-                    container_content = []
-                    for child in section_container.children:
-                        if hasattr(child, 'name'):
-                            if child.name in ['h1', 'h2'] and child != heading:
-                                break
-                            container_content.append(str(child))
-                    if container_content:
-                        section_html_parts = container_content
-            
-            # Build section HTML
-            section_html = ''.join(section_html_parts)
-            
-            # Skip if we've seen this content before (deduplication)
-            content_hash = hashlib.md5(section_html.encode()).hexdigest()[:16]
-            if content_hash in seen_content:
-                continue
-            seen_content.add(content_hash)
-            
-            # Create a temporary soup for this section
+            # Parse the section
             section_soup = BeautifulSoup(section_html, "lxml")
             section_text = section_soup.get_text(strip=True)
             
@@ -501,7 +478,11 @@ class WebScraper:
             if len(section_text) < 50:
                 continue
             
-            # Detect section type
+            # Skip if this is mostly just the heading
+            if len(section_text) < len(heading_text) + 30:
+                continue
+            
+            # Detect section type using only the local content
             is_first = (len(sections) == 0)
             section_type = self._detect_section_type_from_content(
                 heading_text, 
@@ -527,7 +508,7 @@ class WebScraper:
             h3 = section_soup.find('h3')
             if h3:
                 sub_text = h3.get_text(strip=True)
-                if sub_text and not sub_text.startswith('['):
+                if sub_text and not sub_text.startswith('[') and sub_text != heading_text:
                     subheading = sub_text
             
             # Extract images
@@ -548,21 +529,8 @@ class WebScraper:
             )
             content_md = re.sub(r'\n{3,}', '\n\n', content_md).strip()
             
-            # Skip if content too short or duplicate of previous section
+            # Skip very short content
             if len(content_md) < 50:
-                continue
-            
-            # Check for significant content overlap with previous sections
-            content_words = set(content_md.lower().split()[:50])
-            is_duplicate = False
-            for prev_section in sections[-3:]:  # Check last 3 sections
-                prev_words = set(prev_section.get("content", "").lower().split()[:50])
-                overlap = len(content_words & prev_words) / max(len(content_words), 1)
-                if overlap > 0.7:  # 70% overlap = duplicate
-                    is_duplicate = True
-                    break
-            
-            if is_duplicate:
                 continue
             
             sections.append({
@@ -578,9 +546,12 @@ class WebScraper:
         return sections
     
     def _detect_section_type_from_content(self, heading_text, text_content, soup, is_first=False):
-        """Detect section type based on heading and content analysis"""
+        """Detect section type based on heading and ONLY immediate section content"""
         heading_lower = heading_text.lower()
-        text_lower = text_content.lower()
+        
+        # Limit text analysis to first 500 chars to avoid detecting content from later sections
+        text_local = text_content[:500] if len(text_content) > 500 else text_content
+        text_lower = text_local.lower()
         word_count = len(text_content.split())
         
         # Hero: first section
@@ -591,25 +562,35 @@ class WebScraper:
         if heading_text.startswith('[') or heading_text.startswith('BOOK'):
             return "cta"
         
+        # Testimonial: heading is a quote or "Title" (common placeholder)
+        if heading_text.startswith('"') or heading_text.startswith('"') or heading_text == '"Title"':
+            return "testimonial"
+        
+        # Overview - check heading first (before other checks)
+        if "overview" in heading_lower:
+            return "overview"
+        
         # FAQ: heading explicitly says FAQ/questions
         if any(kw in heading_lower for kw in ["faq", "frequently asked", "questions", "q&a"]):
             return "faq"
         
-        # Testimonial: quotes with attribution (be more strict)
-        has_quotes = text_content.count('"') >= 2 or '«' in text_content
-        # Look for clear attribution patterns like "- Name" or "Name Family"
-        attribution_pattern = re.search(r'[—–-]\s*[A-Z][a-z]+\s+[A-Z]|[A-Z][a-z]+\s+Family', text_content)
-        # Also check for "Title" which is often a testimonial placeholder
-        if (has_quotes and attribution_pattern) or ('"Title"' in text_content and has_quotes):
+        # Testimonial: Must have quotes AND attribution in the LOCAL content only
+        has_quotes = text_local.count('"') >= 2 or ('"' in text_local and '"' in text_local)
+        # Attribution must be in this section
+        attribution_pattern = re.search(r'[—–-]\s*(The\s+)?[A-Z][a-z]+\s+[A-Z]|[A-Z][a-z]+\s+Family', text_local)
+        
+        if has_quotes and attribution_pattern and heading_lower not in ["overview", "the most thrilling"]:
             return "testimonial"
         
         # Features/Benefits - check heading
-        if any(kw in heading_lower for kw in ["why choose", "why paddle", "features", "benefits"]):
+        if any(kw in heading_lower for kw in ["why choose", "why paddle", "why ", "features", "benefits"]):
             return "features"
         
         # CTA - short with action words
         cta_in_heading = any(cta in heading_lower for cta in ["book", "contact", "ready to", "let's", "call us", "get started"])
-        if cta_in_heading or (word_count < 100 and any(cta in text_lower for cta in ["book trip", "contact us", "call us"])):
+        if cta_in_heading:
+            return "cta"
+        if word_count < 100 and any(cta in text_lower for cta in ["book trip", "contact us", "call us at"]):
             return "cta"
         
         # Pricing - dollar amounts
@@ -626,13 +607,9 @@ class WebScraper:
         if any(kw in heading_lower for kw in ["what to expect", "how it works", "the process", "your adventure"]):
             return "process"
         
-        # Preparing / Checklist
-        if any(kw in heading_lower for kw in ["preparing", "what to bring", "what you need", "everything you need", "packing"]):
+        # Preparing / Checklist - check heading
+        if any(kw in heading_lower for kw in ["preparing", "what to bring", "what you need", "everything you need", "packing", "gear up"]):
             return "checklist"
-        
-        # Overview
-        if "overview" in heading_lower or heading_lower == "overview":
-            return "overview"
         
         # Gear/Equipment
         if any(kw in heading_lower for kw in ["gear", "equipment", "what we provide"]):
@@ -689,7 +666,9 @@ class WebScraper:
             try:
                 response = self.session.get(url, timeout=15)
                 response.raise_for_status()
-                response.encoding = response.apparent_encoding  # Fix encoding detection
+                
+                # Force UTF-8 encoding to fix character issues
+                response.encoding = 'utf-8'
                 
                 content_type = response.headers.get("Content-Type", "")
                 if "text/html" not in content_type:
