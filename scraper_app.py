@@ -18,6 +18,40 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 MIN_CONTENT_LENGTH = 150
 MIN_PARAGRAPH_WORDS = 8
 
+# Layout detection patterns
+LAYOUT_PATTERNS = {
+    "hero": {
+        "classes": ["hero", "banner", "jumbotron", "masthead", "splash", "cover", "intro-section"],
+        "ids": ["hero", "banner", "masthead", "intro"],
+    },
+    "testimonial": {
+        "classes": ["testimonial", "quote", "review", "customer-quote", "client-quote", "blockquote"],
+        "tags": ["blockquote"],
+    },
+    "faq": {
+        "classes": ["faq", "accordion", "collapsible", "questions", "q-and-a"],
+        "tags": ["details"],
+    },
+    "cta": {
+        "classes": ["cta", "call-to-action", "action-box", "signup", "get-started"],
+    },
+    "gallery": {
+        "classes": ["gallery", "image-grid", "photo-grid", "lightbox", "carousel", "slider"],
+    },
+    "features": {
+        "classes": ["features", "benefits", "services", "offerings", "highlights"],
+    },
+    "pricing": {
+        "classes": ["pricing", "plans", "packages", "tiers"],
+    },
+    "team": {
+        "classes": ["team", "staff", "people", "about-us", "our-team"],
+    },
+    "contact": {
+        "classes": ["contact", "get-in-touch", "reach-us"],
+    },
+}
+
 JUNK_SELECTORS = [
     "nav", "header", "footer", ".navbar", ".menu", ".sidebar",
     ".footer", ".copyright", ".social-links", ".cookie", ".popup",
@@ -123,6 +157,123 @@ class WebScraper:
         text_lower = text.lower()
         return any(pattern in text_lower for pattern in JUNK_TEXT_PATTERNS)
     
+    def _detect_section_type(self, element):
+        """Detect the type of section based on classes, IDs, and structure"""
+        classes = " ".join(element.get("class", [])).lower()
+        elem_id = (element.get("id") or "").lower()
+        tag_name = element.name
+        
+        # Check against known patterns
+        for layout_type, patterns in LAYOUT_PATTERNS.items():
+            # Check classes
+            if "classes" in patterns:
+                for cls in patterns["classes"]:
+                    if cls in classes:
+                        return layout_type
+            # Check IDs
+            if "ids" in patterns:
+                for id_pattern in patterns["ids"]:
+                    if id_pattern in elem_id:
+                        return layout_type
+            # Check tags
+            if "tags" in patterns:
+                if tag_name in patterns["tags"]:
+                    return layout_type
+        
+        return None
+    
+    def _detect_column_layout(self, element):
+        """Detect if element has a multi-column layout"""
+        classes = " ".join(element.get("class", [])).lower()
+        style = (element.get("style") or "").lower()
+        
+        # Bootstrap/common grid patterns
+        col_patterns = {
+            "two_column": ["col-6", "col-md-6", "col-lg-6", "two-col", "half", "split"],
+            "three_column": ["col-4", "col-md-4", "col-lg-4", "three-col", "thirds"],
+            "four_column": ["col-3", "col-md-3", "col-lg-3", "four-col", "quarters"],
+        }
+        
+        for layout, patterns in col_patterns.items():
+            for pattern in patterns:
+                if pattern in classes:
+                    return layout
+        
+        # Check for flexbox/grid in style
+        if "display: flex" in style or "display: grid" in style:
+            # Count direct children to estimate columns
+            children = [c for c in element.children if hasattr(c, 'name') and c.name]
+            if len(children) == 2:
+                return "two_column"
+            elif len(children) == 3:
+                return "three_column"
+            elif len(children) >= 4:
+                return "four_column"
+        
+        return "single_column"
+    
+    def _has_image(self, element):
+        """Check if element contains an image"""
+        return bool(element.find(["img", "picture", "figure", "svg"]))
+    
+    def _extract_section_data(self, element, url):
+        """Extract structured data from a section"""
+        section_type = self._detect_section_type(element) or "content"
+        column_layout = self._detect_column_layout(element)
+        has_image = self._has_image(element)
+        
+        # Determine overall layout type
+        if section_type == "hero":
+            layout = "hero"
+        elif section_type in ["testimonial", "faq", "cta", "gallery", "features", "pricing", "team", "contact"]:
+            layout = section_type
+        elif column_layout != "single_column":
+            if has_image:
+                layout = f"{column_layout}_text_image"
+            else:
+                layout = f"{column_layout}_text"
+        else:
+            layout = "single_column"
+        
+        # Extract headings
+        h1 = element.find("h1")
+        h2 = element.find("h2")
+        h3 = element.find("h3")
+        
+        heading = h1.get_text(strip=True) if h1 else None
+        subheading = (h2 or h3).get_text(strip=True) if (h2 or h3) else None
+        
+        # Extract images
+        images = []
+        for img in element.find_all("img", src=True):
+            src = img.get("src", "")
+            if src and not src.startswith("data:"):
+                if not src.startswith("http"):
+                    src = urljoin(url, src)
+                images.append({
+                    "src": src,
+                    "alt": img.get("alt", ""),
+                })
+        
+        # Get content as markdown
+        content_md = md(
+            str(element),
+            heading_style="ATX",
+            bullets="-",
+            strong_em_symbol="*",
+        )
+        content_md = re.sub(r'\n{3,}', '\n\n', content_md).strip()
+        
+        return {
+            "layout": layout,
+            "section_type": section_type,
+            "heading": heading,
+            "subheading": subheading,
+            "has_image": has_image,
+            "images": images[:5],  # Limit to 5 images
+            "content": content_md,
+        }
+    
     def _extract_content(self, html, url):
         soup = BeautifulSoup(html, "lxml")
         
@@ -148,20 +299,38 @@ class WebScraper:
         if not main_content:
             main_content = soup
         
-        # Convert HTML to Markdown using markdownify
-        # This properly handles headings, bold, italic, lists, links, etc.
+        # Extract sections with layout info
+        sections = []
+        
+        # Look for semantic sections
+        section_tags = main_content.find_all(["section", "article", "div"], recursive=False)
+        
+        # If no clear sections, treat the whole thing as one section
+        if not section_tags:
+            section_tags = [main_content]
+        
+        for section_elem in section_tags:
+            # Skip empty or tiny sections
+            text_content = section_elem.get_text(strip=True)
+            if len(text_content) < 50:
+                continue
+            
+            section_data = self._extract_section_data(section_elem, url)
+            
+            # Skip junk sections
+            if section_data["content"] and not self._is_junk_text(section_data["content"][:200]):
+                sections.append(section_data)
+        
+        # Also create a combined markdown version
         content = md(
             str(main_content),
-            heading_style="ATX",           # Use # style headings
-            bullets="-",                   # Use - for unordered lists
-            strong_em_symbol="*",          # Use * for bold/italic
+            heading_style="ATX",
+            bullets="-",
+            strong_em_symbol="*",
         )
         
         # Clean up the markdown
-        # Remove excessive blank lines
         content = re.sub(r'\n{3,}', '\n\n', content)
-        
-        # Remove lines that are just whitespace
         lines = [line.rstrip() for line in content.split('\n')]
         content = '\n'.join(lines)
         
@@ -169,28 +338,21 @@ class WebScraper:
         filtered_lines = []
         for line in content.split('\n'):
             line_lower = line.lower().strip()
-            # Skip junk patterns
             if any(pattern in line_lower for pattern in JUNK_TEXT_PATTERNS):
                 continue
-            # Skip very short lines (likely navigation)
             if line.strip() and not line.startswith('#') and len(line.strip()) < 15:
-                # Keep it if it's part of a list
                 if not line.strip().startswith('-') and not re.match(r'^\d+\.', line.strip()):
                     continue
             filtered_lines.append(line)
         
-        content = '\n'.join(filtered_lines)
-        
-        # Final cleanup - remove leading/trailing whitespace
-        content = content.strip()
+        content = '\n'.join(filtered_lines).strip()
         
         if len(content) < MIN_CONTENT_LENGTH:
-            # Fallback to plain text
             content = soup.get_text(separator="\n", strip=True)
             lines = [line.strip() for line in content.splitlines() if line.strip()]
             content = "\n".join(lines)
         
-        return title, content
+        return title, content, sections
     
     def _content_hash(self, text):
         normalized = " ".join(text.lower().split())
@@ -247,7 +409,7 @@ class WebScraper:
                 self.status_messages.append(f"❌ Failed: {url} ({str(e)[:50]})")
                 continue
             
-            title, content = self._extract_content(response.text, url)
+            title, content, sections = self._extract_content(response.text, url)
             
             content_hash = self._content_hash(content)
             if content_hash in self.content_hashes:
@@ -257,7 +419,8 @@ class WebScraper:
                 self.content_hashes.add(content_hash)
                 self.unique_content[url] = {
                     "title": title,
-                    "content": content
+                    "content": content,
+                    "sections": sections,
                 }
             
             new_links = self._extract_links(response.text, url)
@@ -278,7 +441,7 @@ class WebScraper:
         return self.unique_content
     
     def to_markdown(self):
-        """Export results as markdown string"""
+        """Export results as markdown string with layout annotations"""
         lines = [
             f"# {urlparse(self.base_url).netloc} – Scraped Content\n",
             f"*Extracted {time.strftime('%Y-%m-%d %H:%M')}*",
@@ -289,8 +452,78 @@ class WebScraper:
         for url, data in self.unique_content.items():
             lines.append(f"## {data['title']}\n")
             lines.append(f"**URL:** {url}\n")
-            lines.append(f"{data['content']}\n")
+            
+            # Add layout summary
+            if data.get("sections"):
+                layouts = [s["layout"] for s in data["sections"] if s.get("layout")]
+                if layouts:
+                    lines.append(f"**Layouts:** {', '.join(layouts)}\n")
+            
+            lines.append(f"\n{data['content']}\n")
             lines.append("---\n")
+        
+        return "\n".join(lines)
+    
+    def to_json(self):
+        """Export results as structured JSON with layout data"""
+        import json
+        
+        output = {
+            "source": self.base_url,
+            "extracted_at": time.strftime('%Y-%m-%d %H:%M'),
+            "page_count": len(self.unique_content),
+            "pages": []
+        }
+        
+        for url, data in self.unique_content.items():
+            page_data = {
+                "url": url,
+                "title": data["title"],
+                "sections": data.get("sections", []),
+                "content_markdown": data["content"],
+            }
+            output["pages"].append(page_data)
+        
+        return json.dumps(output, indent=2, ensure_ascii=False)
+    
+    def to_structured_markdown(self):
+        """Export with detailed layout annotations per section"""
+        lines = [
+            f"# {urlparse(self.base_url).netloc} – Structured Content\n",
+            f"*Extracted {time.strftime('%Y-%m-%d %H:%M')}*",
+            f"*{len(self.unique_content)} pages*\n",
+            "---\n"
+        ]
+        
+        for url, data in self.unique_content.items():
+            lines.append(f"## PAGE: {data['title']}\n")
+            lines.append(f"**URL:** {url}\n")
+            
+            if data.get("sections"):
+                for i, section in enumerate(data["sections"], 1):
+                    lines.append(f"\n### Section {i}: `{section['layout']}`\n")
+                    
+                    if section.get("heading"):
+                        lines.append(f"**Heading:** {section['heading']}")
+                    if section.get("subheading"):
+                        lines.append(f"**Subheading:** {section['subheading']}")
+                    if section.get("has_image"):
+                        lines.append(f"**Has Image:** Yes")
+                        if section.get("images"):
+                            for img in section["images"][:3]:
+                                lines.append(f"  - `{img['src'][:80]}...` ({img.get('alt', 'no alt')})")
+                    
+                    lines.append(f"\n**Content:**\n")
+                    # Truncate very long sections
+                    content = section.get("content", "")[:2000]
+                    if len(section.get("content", "")) > 2000:
+                        content += "\n\n*[Content truncated...]*"
+                    lines.append(content)
+                    lines.append("")
+            else:
+                lines.append(f"\n{data['content']}\n")
+            
+            lines.append("\n---\n")
         
         return "\n".join(lines)
 
@@ -454,23 +687,64 @@ if st.session_state.results:
     st.markdown("---")
     st.header(f"📄 Results: {len(st.session_state.results)} pages")
     
-    # Download button
-    markdown_content = st.session_state.scraper.to_markdown()
-    st.download_button(
-        label="⬇️ Download as Markdown",
-        data=markdown_content,
-        file_name=f"scraped_{urlparse(url).netloc}.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
+    # Export options
+    st.subheader("Export")
+    export_col1, export_col2, export_col3 = st.columns(3)
+    
+    with export_col1:
+        markdown_content = st.session_state.scraper.to_markdown()
+        st.download_button(
+            label="📝 Markdown",
+            data=markdown_content,
+            file_name=f"scraped_{urlparse(url).netloc}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    
+    with export_col2:
+        structured_md = st.session_state.scraper.to_structured_markdown()
+        st.download_button(
+            label="📐 With Layouts",
+            data=structured_md,
+            file_name=f"scraped_{urlparse(url).netloc}_structured.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    
+    with export_col3:
+        json_content = st.session_state.scraper.to_json()
+        st.download_button(
+            label="🔧 JSON",
+            data=json_content,
+            file_name=f"scraped_{urlparse(url).netloc}.json",
+            mime="application/json",
+            use_container_width=True
+        )
     
     # Preview results
     st.markdown("### Preview")
     
     for i, (page_url, data) in enumerate(st.session_state.results.items()):
-        with st.expander(f"**{data['title']}** - {page_url[:50]}..."):
+        # Show layout summary in expander title
+        layouts = []
+        if data.get("sections"):
+            layouts = list(set(s["layout"] for s in data["sections"] if s.get("layout")))
+        layout_str = f" [{', '.join(layouts[:3])}]" if layouts else ""
+        
+        with st.expander(f"**{data['title']}**{layout_str}"):
             st.markdown(f"**URL:** {page_url}")
-            st.markdown("**Content:**")
+            
+            # Show sections breakdown
+            if data.get("sections"):
+                st.markdown("**Page Structure:**")
+                for j, section in enumerate(data["sections"], 1):
+                    layout = section.get("layout", "unknown")
+                    heading = section.get("heading", "")[:50] or "(no heading)"
+                    has_img = "🖼️" if section.get("has_image") else ""
+                    st.markdown(f"- Section {j}: `{layout}` – {heading} {has_img}")
+            
+            st.markdown("---")
+            st.markdown("**Content Preview:**")
             st.text(data['content'][:1000] + ("..." if len(data['content']) > 1000 else ""))
 
 # Footer
