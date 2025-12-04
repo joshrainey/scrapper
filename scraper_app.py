@@ -393,6 +393,9 @@ class WebScraper:
         
         content = '\n'.join(filtered_lines).strip()
         
+        # Fix encoding issues
+        content = self._fix_encoding(content)
+        
         if len(content) < MIN_CONTENT_LENGTH:
             content = soup.get_text(separator="\n", strip=True)
             lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -414,12 +417,8 @@ class WebScraper:
                 sections.append(section_data)
             return sections
         
-        # Get the full HTML and find heading positions
-        full_html = str(main_content)
-        
         for i, heading in enumerate(major_headings):
             heading_text = heading.get_text(strip=True)
-            heading_html = str(heading)
             
             # Skip empty, very short, or junk headings
             if not heading_text or len(heading_text) < 3:
@@ -438,48 +437,52 @@ class WebScraper:
             # Find next heading to know where this section ends
             next_heading = major_headings[i + 1] if i + 1 < len(major_headings) else None
             
-            # Extract content for this section
-            # Strategy: get content from heading's parent container
-            section_container = heading.parent
+            # IMPROVED: Build section content by collecting siblings until next heading
+            section_parts = [heading]
             
-            # Walk up to find a container that has meaningful content
-            while section_container:
-                container_text = section_container.get_text(strip=True)
-                # Stop if container has enough content
-                if len(container_text) > len(heading_text) + 50:
+            # Method 1: Try to get following siblings of the heading
+            current = heading.find_next_sibling()
+            found_content = False
+            
+            while current:
+                # Stop if we hit the next major heading
+                if current.name in ['h1', 'h2']:
                     break
-                parent = section_container.parent
+                if next_heading and (current == next_heading or (hasattr(current, 'find') and current.find(['h1', 'h2']))):
+                    break
+                
+                section_parts.append(current)
+                found_content = True
+                current = current.find_next_sibling()
+                
+                if len(section_parts) > 20:
+                    break
+            
+            # Method 2: If no siblings found, try immediate parent's content
+            if not found_content:
+                parent = heading.parent
                 if parent and parent.name not in ['body', 'html', '[document]']:
-                    section_container = parent
-                else:
-                    break
+                    # Only use parent if it's small enough (not the whole page)
+                    parent_text = parent.get_text(strip=True)
+                    if len(parent_text) < 2000:  # Limit to avoid grabbing whole page
+                        section_parts = [parent]
             
-            # Get section content
-            if section_container:
-                section_html = str(section_container)
-            else:
-                section_html = heading_html
+            # Build section HTML from parts
+            section_html = ''.join(str(p) for p in section_parts)
             
-            # If next heading exists, try to truncate content at that point
-            if next_heading:
-                next_heading_text = next_heading.get_text(strip=True)
-                # Find where next heading appears and truncate
-                next_heading_html = str(next_heading)
-                if next_heading_html in section_html:
-                    idx = section_html.find(next_heading_html)
-                    if idx > 0:
-                        section_html = section_html[:idx]
+            # Safety check: don't use if it's too large (likely grabbed whole page)
+            if len(section_html) > 15000:
+                # Fall back to just the heading
+                section_html = str(heading)
             
             # Parse the section
             section_soup = BeautifulSoup(section_html, "lxml")
             section_text = section_soup.get_text(strip=True)
             
-            # Skip if too short
-            if len(section_text) < 50:
+            # Skip if too short or just the heading
+            if len(section_text) < 30:
                 continue
-            
-            # Skip if this is mostly just the heading
-            if len(section_text) < len(heading_text) + 30:
+            if len(section_text) < len(heading_text) + 20:
                 continue
             
             # Detect section type using only the local content
@@ -520,7 +523,7 @@ class WebScraper:
                         src = urljoin(url, src)
                     images.append({"src": src, "alt": img.get("alt", "")})
             
-            # Get markdown content
+            # Get markdown content and fix encoding
             content_md = md(
                 str(section_soup),
                 heading_style="ATX",
@@ -528,9 +531,10 @@ class WebScraper:
                 strong_em_symbol="*",
             )
             content_md = re.sub(r'\n{3,}', '\n\n', content_md).strip()
+            content_md = self._fix_encoding(content_md)
             
             # Skip very short content
-            if len(content_md) < 50:
+            if len(content_md) < 30:
                 continue
             
             sections.append({
@@ -544,6 +548,23 @@ class WebScraper:
             })
         
         return sections
+    
+    def _fix_encoding(self, text):
+        """Fix common encoding issues"""
+        replacements = {
+            'â€"': '—',  # em dash
+            'â€"': '–',  # en dash
+            'â€™': "'",  # right single quote
+            'â€œ': '"',  # left double quote
+            'â€': '"',   # right double quote
+            'â€˜': "'",  # left single quote
+            'Â ': ' ',   # non-breaking space artifact
+            'Â': '',     # lone Â
+            '\xa0': ' ', # actual non-breaking space
+        }
+        for bad, good in replacements.items():
+            text = text.replace(bad, good)
+        return text
     
     def _detect_section_type_from_content(self, heading_text, text_content, soup, is_first=False):
         """Detect section type based on heading and ONLY immediate section content"""
@@ -732,7 +753,8 @@ class WebScraper:
             lines.append(f"\n{data['content']}\n")
             lines.append("---\n")
         
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return self._fix_encoding(result)
     
     def to_json(self):
         """Export results as structured JSON with layout data"""
@@ -746,11 +768,23 @@ class WebScraper:
         }
         
         for url, data in self.unique_content.items():
+            # Fix encoding in sections
+            fixed_sections = []
+            for section in data.get("sections", []):
+                fixed_section = section.copy()
+                if "content" in fixed_section:
+                    fixed_section["content"] = self._fix_encoding(fixed_section["content"])
+                if "heading" in fixed_section:
+                    fixed_section["heading"] = self._fix_encoding(fixed_section["heading"])
+                if "subheading" in fixed_section and fixed_section["subheading"]:
+                    fixed_section["subheading"] = self._fix_encoding(fixed_section["subheading"])
+                fixed_sections.append(fixed_section)
+            
             page_data = {
                 "url": url,
-                "title": data["title"],
-                "sections": data.get("sections", []),
-                "content_markdown": data["content"],
+                "title": self._fix_encoding(data["title"]),
+                "sections": fixed_sections,
+                "content_markdown": self._fix_encoding(data["content"]),
             }
             output["pages"].append(page_data)
         
@@ -805,7 +839,8 @@ class WebScraper:
             
             lines.append("\n---\n")
         
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        return self._fix_encoding(result)
 
 
 # ============ STREAMLIT UI ============
