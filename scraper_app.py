@@ -420,13 +420,13 @@ class WebScraper:
         for i, heading in enumerate(major_headings):
             heading_text = heading.get_text(strip=True)
             
-            # Skip empty, very short, or junk headings
-            if not heading_text or len(heading_text) < 3:
+            # Skip empty or junk headings
+            if not heading_text or len(heading_text) < 2:
                 continue
             if self._is_junk_text(heading_text):
                 continue
-            # Skip button-like headings
-            if heading_text.startswith('[') and heading_text.endswith(']'):
+            # Skip pure button headings like "[ Book Trip ]"
+            if heading_text.startswith('[') and heading_text.endswith(']') and len(heading_text) < 30:
                 continue
             # Skip duplicates
             heading_key = heading_text.lower().strip()[:50]
@@ -437,55 +437,56 @@ class WebScraper:
             # Find next heading to know where this section ends
             next_heading = major_headings[i + 1] if i + 1 < len(major_headings) else None
             
-            # IMPROVED: Build section content by collecting siblings until next heading
+            # Collect section content using document order
             section_parts = [heading]
             
-            # Method 1: Try to get following siblings of the heading
-            current = heading.find_next_sibling()
-            found_content = False
-            
-            while current:
+            # Use document flow: find all elements between this heading and the next
+            current_elem = heading
+            while True:
+                # Find next element in document order
+                next_elem = current_elem.find_next()
+                if next_elem is None:
+                    break
+                
                 # Stop if we hit the next major heading
-                if current.name in ['h1', 'h2']:
-                    break
-                if next_heading and (current == next_heading or (hasattr(current, 'find') and current.find(['h1', 'h2']))):
+                if next_elem in major_headings and next_elem != heading:
                     break
                 
-                section_parts.append(current)
-                found_content = True
-                current = current.find_next_sibling()
-                
-                if len(section_parts) > 20:
+                # Stop if we've gone too far
+                if len(section_parts) > 25:
                     break
-            
-            # Method 2: If no siblings found, try immediate parent's content
-            if not found_content:
-                parent = heading.parent
-                if parent and parent.name not in ['body', 'html', '[document]']:
-                    # Only use parent if it's small enough (not the whole page)
-                    parent_text = parent.get_text(strip=True)
-                    if len(parent_text) < 2000:  # Limit to avoid grabbing whole page
-                        section_parts = [parent]
+                
+                # Only add meaningful elements (not NavigableString, not scripts, etc.)
+                if hasattr(next_elem, 'name') and next_elem.name:
+                    if next_elem.name in ['script', 'style', 'meta', 'link']:
+                        current_elem = next_elem
+                        continue
+                    # Don't add if it contains the next heading
+                    if next_heading and next_elem.find(['h1', 'h2']):
+                        break
+                    # Add block-level elements
+                    if next_elem.name in ['p', 'div', 'ul', 'ol', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'table', 'img', 'figure']:
+                        section_parts.append(next_elem)
+                
+                current_elem = next_elem
             
             # Build section HTML from parts
             section_html = ''.join(str(p) for p in section_parts)
             
             # Safety check: don't use if it's too large (likely grabbed whole page)
-            if len(section_html) > 15000:
-                # Fall back to just the heading
+            if len(section_html) > 10000:
                 section_html = str(heading)
             
             # Parse the section
             section_soup = BeautifulSoup(section_html, "lxml")
             section_text = section_soup.get_text(strip=True)
             
-            # Skip if too short or just the heading
-            if len(section_text) < 30:
-                continue
-            if len(section_text) < len(heading_text) + 20:
+            # Include section even if it's just a heading (useful for layout detection)
+            # Only skip if truly empty
+            if len(section_text) < 5:
                 continue
             
-            # Detect section type using only the local content
+            # Detect section type
             is_first = (len(sections) == 0)
             section_type = self._detect_section_type_from_content(
                 heading_text, 
@@ -533,15 +534,11 @@ class WebScraper:
             content_md = re.sub(r'\n{3,}', '\n\n', content_md).strip()
             content_md = self._fix_encoding(content_md)
             
-            # Skip very short content
-            if len(content_md) < 30:
-                continue
-            
             sections.append({
                 "layout": layout,
                 "section_type": section_type or "content",
-                "heading": heading_text,
-                "subheading": subheading,
+                "heading": self._fix_encoding(heading_text),
+                "subheading": self._fix_encoding(subheading) if subheading else None,
                 "has_image": has_image,
                 "images": images,
                 "content": content_md,
@@ -550,20 +547,34 @@ class WebScraper:
         return sections
     
     def _fix_encoding(self, text):
-        """Fix common encoding issues"""
+        """Fix common encoding issues (mojibake from UTF-8 decoded as Latin-1)"""
+        if not text:
+            return text
+        
+        # Try to fix mojibake by re-encoding
+        try:
+            # This fixes cases where UTF-8 was incorrectly decoded as Latin-1
+            fixed = text.encode('latin-1').decode('utf-8')
+            return fixed
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+        
+        # Manual replacements as fallback
         replacements = {
             'â€"': '—',  # em dash
-            'â€"': '–',  # en dash
+            'â€"': '–',  # en dash  
             'â€™': "'",  # right single quote
             'â€œ': '"',  # left double quote
-            'â€': '"',   # right double quote
+            'â€': '"',   # right double quote (partial)
             'â€˜': "'",  # left single quote
             'Â ': ' ',   # non-breaking space artifact
             'Â': '',     # lone Â
             '\xa0': ' ', # actual non-breaking space
+            'â€¢': '•',  # bullet
         }
         for bad, good in replacements.items():
             text = text.replace(bad, good)
+        
         return text
     
     def _detect_section_type_from_content(self, heading_text, text_content, soup, is_first=False):
@@ -688,8 +699,8 @@ class WebScraper:
                 response = self.session.get(url, timeout=15)
                 response.raise_for_status()
                 
-                # Force UTF-8 encoding to fix character issues
-                response.encoding = 'utf-8'
+                # Fix encoding: get raw bytes and decode as UTF-8
+                html_content = response.content.decode('utf-8', errors='replace')
                 
                 content_type = response.headers.get("Content-Type", "")
                 if "text/html" not in content_type:
@@ -699,7 +710,7 @@ class WebScraper:
                 self.status_messages.append(f"❌ Failed: {url} ({str(e)[:50]})")
                 continue
             
-            title, content, sections = self._extract_content(response.text, url)
+            title, content, sections = self._extract_content(html_content, url)
             
             content_hash = self._content_hash(content)
             if content_hash in self.content_hashes:
@@ -713,7 +724,7 @@ class WebScraper:
                     "sections": sections,
                 }
             
-            new_links = self._extract_links(response.text, url)
+            new_links = self._extract_links(html_content, url)
             if not self.single_page_mode:
                 self.to_visit.update(new_links)
             
@@ -800,7 +811,7 @@ class WebScraper:
         ]
         
         for url, data in self.unique_content.items():
-            lines.append(f"## PAGE: {data['title']}\n")
+            lines.append(f"## PAGE: {self._fix_encoding(data['title'])}\n")
             lines.append(f"**URL:** {url}\n")
             
             if data.get("sections"):
