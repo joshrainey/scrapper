@@ -364,29 +364,8 @@ class WebScraper:
         if not main_content:
             main_content = soup
         
-        # Extract sections with layout info
-        sections = []
-        
-        # Look for semantic sections
-        section_tags = main_content.find_all(["section", "article", "div"], recursive=False)
-        
-        # If no clear sections, treat the whole thing as one section
-        if not section_tags:
-            section_tags = [main_content]
-        
-        for idx, section_elem in enumerate(section_tags):
-            # Skip empty or tiny sections
-            text_content = section_elem.get_text(strip=True)
-            if len(text_content) < 50:
-                continue
-            
-            # First meaningful section is likely hero
-            is_first_section = (len(sections) == 0)
-            section_data = self._extract_section_data(section_elem, url, is_first=is_first_section)
-            
-            # Skip junk sections
-            if section_data["content"] and not self._is_junk_text(section_data["content"][:200]):
-                sections.append(section_data)
+        # Extract sections by finding heading-based boundaries
+        sections = self._extract_sections_by_headings(main_content, url)
         
         # Also create a combined markdown version
         content = md(
@@ -420,6 +399,187 @@ class WebScraper:
             content = "\n".join(lines)
         
         return title, content, sections
+    
+    def _extract_sections_by_headings(self, main_content, url):
+        """Extract sections by splitting content at major headings"""
+        sections = []
+        
+        # Find all headings in order
+        all_headings = main_content.find_all(['h1', 'h2', 'h3'])
+        
+        if not all_headings:
+            # No headings found, treat whole thing as one section
+            section_data = self._extract_section_data(main_content, url, is_first=True)
+            if section_data["content"]:
+                sections.append(section_data)
+            return sections
+        
+        # Process each heading and its following content
+        for i, heading in enumerate(all_headings):
+            heading_text = heading.get_text(strip=True)
+            heading_level = int(heading.name[1])
+            
+            # Skip empty or junk headings
+            if not heading_text or len(heading_text) < 3:
+                continue
+            if self._is_junk_text(heading_text):
+                continue
+            
+            # Find content between this heading and the next
+            content_elements = []
+            current = heading.find_next_sibling()
+            
+            # Also check parent's siblings for Google Sites nested structure
+            if not current:
+                parent = heading.parent
+                while parent and not current:
+                    current = parent.find_next_sibling()
+                    parent = parent.parent
+            
+            # Collect elements until next heading
+            next_heading = all_headings[i + 1] if i + 1 < len(all_headings) else None
+            
+            while current:
+                # Stop if we hit the next heading
+                if next_heading and (current == next_heading or current.find(next_heading)):
+                    break
+                if current.name in ['h1', 'h2', 'h3']:
+                    break
+                    
+                content_elements.append(current)
+                current = current.find_next_sibling()
+                
+                # Limit to prevent runaway
+                if len(content_elements) > 50:
+                    break
+            
+            # Build section HTML
+            section_html = str(heading)
+            for elem in content_elements:
+                section_html += str(elem)
+            
+            # Create a temporary soup for this section
+            section_soup = BeautifulSoup(section_html, "lxml")
+            
+            # Detect section type
+            is_first = (len(sections) == 0)
+            section_type = self._detect_section_type_from_content(
+                heading_text, 
+                section_soup.get_text(strip=True),
+                section_soup,
+                is_first
+            )
+            
+            # Get column layout
+            column_layout = self._detect_column_layout(section_soup)
+            has_image = self._has_image(section_soup)
+            
+            # Determine final layout
+            if section_type:
+                layout = section_type
+            elif column_layout != "single_column":
+                layout = f"{column_layout}_text_image" if has_image else f"{column_layout}_text"
+            else:
+                layout = "single_column"
+            
+            # Get subheading (first h3 after h2, or first h2 after h1)
+            subheading = None
+            if heading_level == 1:
+                sub = section_soup.find(['h2', 'h3'])
+                if sub and sub != heading:
+                    subheading = sub.get_text(strip=True)
+            elif heading_level == 2:
+                sub = section_soup.find('h3')
+                if sub:
+                    subheading = sub.get_text(strip=True)
+            
+            # Extract images
+            images = []
+            for img in section_soup.find_all("img", src=True)[:5]:
+                src = img.get("src", "")
+                if src and not src.startswith("data:"):
+                    if not src.startswith("http"):
+                        src = urljoin(url, src)
+                    images.append({"src": src, "alt": img.get("alt", "")})
+            
+            # Get markdown content
+            content_md = md(
+                str(section_soup),
+                heading_style="ATX",
+                bullets="-",
+                strong_em_symbol="*",
+            )
+            content_md = re.sub(r'\n{3,}', '\n\n', content_md).strip()
+            
+            if len(content_md) > 30:  # Skip tiny sections
+                sections.append({
+                    "layout": layout,
+                    "section_type": section_type or "content",
+                    "heading": heading_text,
+                    "subheading": subheading,
+                    "has_image": has_image,
+                    "images": images,
+                    "content": content_md,
+                })
+        
+        return sections
+    
+    def _detect_section_type_from_content(self, heading_text, text_content, soup, is_first=False):
+        """Detect section type based on heading and content analysis"""
+        heading_lower = heading_text.lower()
+        text_lower = text_content.lower()
+        
+        # Hero: first section
+        if is_first:
+            return "hero"
+        
+        # FAQ: heading contains FAQ/questions, or multiple ?
+        if any(kw in heading_lower for kw in ["faq", "question", "q&a", "asked"]):
+            return "faq"
+        if text_content.count("?") >= 3:
+            return "faq"
+        
+        # Testimonial: quotes with attribution
+        has_quotes = any(q in text_content for q in ['"', '"', '"', '«', '»'])
+        # Look for attribution patterns
+        attribution_pattern = re.search(r'[—–-]\s*[A-Z][a-z]+|[A-Z][a-z]+\s+Family|[A-Z]\.\s+[A-Z]', text_content)
+        if has_quotes and attribution_pattern:
+            return "testimonial"
+        
+        # Features/Benefits
+        if any(kw in heading_lower for kw in ["why", "features", "benefits", "what we", "what you"]):
+            return "features"
+        
+        # CTA
+        cta_phrases = ["book", "contact", "get started", "ready to", "call us", "let's"]
+        if any(cta in heading_lower for cta in cta_phrases):
+            return "cta"
+        if any(cta in text_lower for cta in cta_phrases) and len(text_content.split()) < 100:
+            return "cta"
+        
+        # Pricing
+        if any(kw in heading_lower for kw in ["pricing", "price", "cost", "plans"]):
+            return "pricing"
+        if re.search(r'\$\d+|per person|starting at', text_lower):
+            return "pricing"
+        
+        # Choose/Options (multi-column)
+        if any(kw in heading_lower for kw in ["choose", "options", "adventures", "trips", "services"]):
+            return "options"
+        
+        # What to Expect / Process
+        if any(kw in heading_lower for kw in ["expect", "how it works", "process", "steps"]):
+            return "process"
+        
+        # Preparing / Requirements
+        if any(kw in heading_lower for kw in ["preparing", "prepare", "bring", "need", "requirements"]):
+            return "checklist"
+        
+        # Overview
+        if "overview" in heading_lower:
+            return "overview"
+        
+        return None
     
     def _content_hash(self, text):
         normalized = " ".join(text.lower().split())
@@ -470,6 +630,7 @@ class WebScraper:
             try:
                 response = self.session.get(url, timeout=15)
                 response.raise_for_status()
+                response.encoding = response.apparent_encoding  # Fix encoding detection
                 
                 content_type = response.headers.get("Content-Type", "")
                 if "text/html" not in content_type:
@@ -571,8 +732,17 @@ class WebScraper:
             lines.append(f"**URL:** {url}\n")
             
             if data.get("sections"):
+                lines.append(f"\n**Page Structure:** {len(data['sections'])} sections detected\n")
+                
                 for i, section in enumerate(data["sections"], 1):
-                    lines.append(f"\n### Section {i}: `{section['layout']}`\n")
+                    layout = section.get('layout', 'content')
+                    section_type = section.get('section_type', 'content')
+                    
+                    lines.append(f"\n---\n")
+                    lines.append(f"### Section {i}: `{layout}`")
+                    if section_type and section_type != layout:
+                        lines.append(f" (type: `{section_type}`)")
+                    lines.append("\n")
                     
                     if section.get("heading"):
                         lines.append(f"**Heading:** {section['heading']}")
@@ -582,7 +752,8 @@ class WebScraper:
                         lines.append(f"**Has Image:** Yes")
                         if section.get("images"):
                             for img in section["images"][:3]:
-                                lines.append(f"  - `{img['src'][:80]}...` ({img.get('alt', 'no alt')})")
+                                alt = img.get('alt', 'no alt')[:50]
+                                lines.append(f"  - ![{alt}]({img['src'][:80]}...)")
                     
                     lines.append(f"\n**Content:**\n")
                     # Truncate very long sections
