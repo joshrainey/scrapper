@@ -1,14 +1,16 @@
 # scraper_app.py
 # Run with: streamlit run scraper_app.py
-# Requires: pip install streamlit requests beautifulsoup4 lxml
+# Requires: pip install streamlit requests beautifulsoup4 lxml markdownify
 
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+from markdownify import markdownify as md
 from urllib.parse import urljoin, urlparse, urldefrag
 from urllib.robotparser import RobotFileParser
 import time
 import hashlib
+import re
 from collections import OrderedDict
 
 # ============ CONFIGURATION ============
@@ -124,122 +126,66 @@ class WebScraper:
     def _extract_content(self, html, url):
         soup = BeautifulSoup(html, "lxml")
         
+        # Remove junk elements first
         for selector in JUNK_SELECTORS:
             for element in soup.select(selector):
                 element.decompose()
         
-        for tag in soup(["script", "style", "noscript", "meta", "link", "iframe"]):
+        for tag in soup(["script", "style", "noscript", "meta", "link", "iframe", "svg", "path"]):
             tag.decompose()
         
         title = self._extract_title(soup, url)
         
-        # Convert HTML formatting to Markdown before extracting text
-        # Bold
-        for tag in soup.find_all(["strong", "b"]):
-            tag.insert_before("**")
-            tag.insert_after("**")
-            tag.unwrap()
-        
-        # Italic
-        for tag in soup.find_all(["em", "i"]):
-            tag.insert_before("*")
-            tag.insert_after("*")
-            tag.unwrap()
-        
-        # Links - convert to markdown format
-        for tag in soup.find_all("a", href=True):
-            href = tag.get("href", "")
-            text = tag.get_text(strip=True)
-            if text and href and not href.startswith(("#", "javascript:")):
-                # Make relative URLs absolute
-                if not href.startswith("http"):
-                    href = urljoin(url, href)
-                tag.replace_with(f"[{text}]({href})")
-            else:
-                tag.unwrap()
-        
-        # Code blocks
-        for tag in soup.find_all("pre"):
-            code_text = tag.get_text()
-            tag.replace_with(f"\n```\n{code_text}\n```\n")
-        
-        # Inline code
-        for tag in soup.find_all("code"):
-            code_text = tag.get_text()
-            tag.replace_with(f"`{code_text}`")
-        
-        # Blockquotes
-        for tag in soup.find_all("blockquote"):
-            quote_text = tag.get_text(separator="\n", strip=True)
-            lines = [f"> {line}" for line in quote_text.split("\n") if line.strip()]
-            tag.replace_with("\n" + "\n".join(lines) + "\n")
-        
-        content_blocks = []
-        
+        # Find main content area
         main_content = (
             soup.find("main") or 
             soup.find("article") or 
             soup.find(class_=lambda x: x and ("content" in x.lower() or "body" in x.lower())) or
-            soup.find(id=lambda x: x and ("content" in x.lower() or "main" in x.lower()))
+            soup.find(id=lambda x: x and ("content" in x.lower() or "main" in x.lower())) or
+            soup.body
         )
         
-        search_area = main_content if main_content else soup
+        if not main_content:
+            main_content = soup
         
-        # Process lists separately to preserve structure
-        for ul in search_area.find_all("ul", recursive=False):
-            list_items = []
-            for li in ul.find_all("li", recursive=False):
-                text = li.get_text(separator=" ", strip=True)
-                if text and len(text.split()) >= 3:
-                    list_items.append(f"- {text}")
-            if list_items:
-                ul.replace_with("\n" + "\n".join(list_items) + "\n")
+        # Convert HTML to Markdown using markdownify
+        # This properly handles headings, bold, italic, lists, links, etc.
+        content = md(
+            str(main_content),
+            heading_style="ATX",           # Use # style headings
+            bullets="-",                   # Use - for unordered lists
+            strong_em_symbol="*",          # Use * for bold/italic
+        )
         
-        for ol in search_area.find_all("ol", recursive=False):
-            list_items = []
-            for i, li in enumerate(ol.find_all("li", recursive=False), 1):
-                text = li.get_text(separator=" ", strip=True)
-                if text and len(text.split()) >= 3:
-                    list_items.append(f"{i}. {text}")
-            if list_items:
-                ol.replace_with("\n" + "\n".join(list_items) + "\n")
+        # Clean up the markdown
+        # Remove excessive blank lines
+        content = re.sub(r'\n{3,}', '\n\n', content)
         
-        # Now extract content with formatting preserved
-        for elem in search_area.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "div"]):
-            # Skip if inside a nested container we'll process separately
-            if elem.find_parent(["blockquote", "ul", "ol"]):
+        # Remove lines that are just whitespace
+        lines = [line.rstrip() for line in content.split('\n')]
+        content = '\n'.join(lines)
+        
+        # Filter out junk lines
+        filtered_lines = []
+        for line in content.split('\n'):
+            line_lower = line.lower().strip()
+            # Skip junk patterns
+            if any(pattern in line_lower for pattern in JUNK_TEXT_PATTERNS):
                 continue
-                
-            text = elem.get_text(separator=" ", strip=True)
-            word_count = len(text.split())
-            
-            if word_count >= MIN_PARAGRAPH_WORDS and not self._is_junk_text(text):
-                # Add heading markers
-                if elem.name == "h1":
-                    text = f"# {text}"
-                elif elem.name == "h2":
-                    text = f"## {text}"
-                elif elem.name == "h3":
-                    text = f"### {text}"
-                elif elem.name == "h4":
-                    text = f"#### {text}"
-                elif elem.name == "h5":
-                    text = f"##### {text}"
-                elif elem.name == "h6":
-                    text = f"###### {text}"
-                elif elem.name == "li":
-                    text = f"- {text}"
-                
-                content_blocks.append(text)
+            # Skip very short lines (likely navigation)
+            if line.strip() and not line.startswith('#') and len(line.strip()) < 15:
+                # Keep it if it's part of a list
+                if not line.strip().startswith('-') and not re.match(r'^\d+\.', line.strip()):
+                    continue
+            filtered_lines.append(line)
         
-        content = "\n\n".join(content_blocks)
+        content = '\n'.join(filtered_lines)
         
-        # Clean up any double markdown artifacts
-        content = content.replace("****", "**")  # Fix double bold
-        content = content.replace("**.**", "**")
-        content = content.replace("* *", " ")
+        # Final cleanup - remove leading/trailing whitespace
+        content = content.strip()
         
         if len(content) < MIN_CONTENT_LENGTH:
+            # Fallback to plain text
             content = soup.get_text(separator="\n", strip=True)
             lines = [line.strip() for line in content.splitlines() if line.strip()]
             content = "\n".join(lines)
