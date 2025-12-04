@@ -801,6 +801,197 @@ class WebScraper:
         
         return json.dumps(output, indent=2, ensure_ascii=False)
     
+    def to_structure_only(self):
+        """Export layout structure only - for matching with manually copied content"""
+        lines = [
+            f"# {urlparse(self.base_url).netloc} – Page Structure\n",
+            f"*Extracted {time.strftime('%Y-%m-%d %H:%M')}*\n",
+            "---\n",
+            "## Layout Types Reference\n",
+            "| Layout | Description |",
+            "|--------|-------------|",
+            "| `hero` | Large header section with background image |",
+            "| `single_column` | One column of content |",
+            "| `two_column` | Two columns side by side |",
+            "| `three_column` | Three columns (features/benefits) |",
+            "| `four_column` | Four columns (icons/stats) |",
+            "| `gallery` | Image gallery grid |",
+            "| `testimonial` | Customer quote with photo |",
+            "| `faq` | Accordion-style Q&A section |",
+            "| `cta` | Call-to-action with button |",
+            "| `pricing` | Pricing card/table |",
+            "| `features` | Features/benefits list |",
+            "| `checklist` | Checklist/what to bring |",
+            "| `process` | Step-by-step process |",
+            "| `options` | Multiple choice cards |",
+            "| `overview` | Overview/intro section |",
+            "\n---\n"
+        ]
+        
+        for url, data in self.unique_content.items():
+            lines.append(f"## PAGE: {self._fix_encoding(data['title'])}\n")
+            lines.append(f"**URL:** {url}\n")
+            
+            sections = data.get("sections", [])
+            if sections:
+                lines.append(f"\n**Total Sections:** {len(sections)}\n")
+                lines.append("\n### Section Structure\n")
+                
+                for idx, section in enumerate(sections, 1):
+                    layout = section.get("layout", "unknown")
+                    section_type = section.get("section_type", "content")
+                    heading = self._fix_encoding(section.get("heading", "")) or "(no heading)"
+                    subheading = self._fix_encoding(section.get("subheading", "")) if section.get("subheading") else None
+                    has_image = section.get("has_image", False)
+                    
+                    lines.append(f"\n---\n")
+                    lines.append(f"### Section {idx}: `{layout}`\n")
+                    
+                    # Structure template based on layout type
+                    if layout == "hero":
+                        lines.append("**Template:** Hero Section\n")
+                        lines.append(f"- **H1:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Tagline:** {subheading}")
+                        lines.append("- **Background Image:** [1600×900 - 16:9]")
+                        lines.append("- **CTA Button:** [ ]")
+                    
+                    elif layout == "testimonial":
+                        lines.append("**Template:** Testimonial\n")
+                        lines.append(f"- **Quote:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Full Quote:** {subheading[:100]}...")
+                        lines.append("- **Author Name:** [ ]")
+                        lines.append("- **Author Title:** [ ]")
+                        lines.append("- **Photo:** [200×200 - square]")
+                    
+                    elif layout == "faq":
+                        lines.append("**Template:** FAQ Accordion\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        # Try to extract Q&A pairs from content
+                        content = section.get("content", "")
+                        questions = re.findall(r'\?', content)
+                        q_count = len(questions) if questions else 3
+                        lines.append(f"- **Q&A Pairs:** ~{q_count} questions detected")
+                        for q in range(min(q_count, 6)):
+                            lines.append(f"  - Q{q+1}: [ ]")
+                            lines.append(f"  - A{q+1}: [ ]")
+                    
+                    elif layout == "cta":
+                        lines.append("**Template:** Call to Action\n")
+                        lines.append(f"- **Heading:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Subheading:** {subheading[:80]}...")
+                        lines.append("- **Button 1:** [ ]")
+                        lines.append("- **Button 2:** [ ] (optional)")
+                    
+                    elif layout == "pricing":
+                        lines.append("**Template:** Pricing Card\n")
+                        lines.append(f"- **Plan Name:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Subtitle:** {subheading}")
+                        lines.append("- **Price:** $[ ] per [ ]")
+                        lines.append("- **Description:** [ ]")
+                        lines.append("- **CTA Button:** [ ]")
+                    
+                    elif layout == "features":
+                        lines.append("**Template:** Features/Benefits\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Subheading:** {subheading}")
+                        # Estimate feature count from content
+                        content = section.get("content", "")
+                        bullets = content.count("- ")
+                        feature_count = bullets if bullets > 0 else 4
+                        lines.append(f"- **Features:** ~{feature_count} items")
+                        for f in range(min(feature_count, 6)):
+                            lines.append(f"  - Feature {f+1}: [ ]")
+                    
+                    elif layout == "checklist":
+                        lines.append("**Template:** Checklist\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Subheading:** {subheading}")
+                        content = section.get("content", "")
+                        bullets = content.count("- ")
+                        lines.append(f"- **List Items:** ~{bullets} items")
+                    
+                    elif layout == "process":
+                        lines.append("**Template:** Process/Steps\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        if subheading:
+                            lines.append(f"- **Subheading:** {subheading}")
+                        lines.append("- **Steps:**")
+                        lines.append("  - Step 1: [ ]")
+                        lines.append("  - Step 2: [ ]")
+                        lines.append("  - Step 3: [ ]")
+                    
+                    elif layout == "options":
+                        lines.append("**Template:** Options/Cards\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        lines.append("- **Option Cards:** (see pricing sections below)")
+                    
+                    elif layout == "overview":
+                        lines.append("**Template:** Overview/Intro\n")
+                        lines.append(f"- **H2:** {heading}")
+                        if subheading:
+                            lines.append(f"- **H3:** {subheading}")
+                        lines.append("- **Body Text:** [ ]")
+                        lines.append("- **Bullet Points:** [ ] (if any)")
+                        if has_image:
+                            lines.append("- **Image:** [1000px wide]")
+                    
+                    elif "two_column" in layout:
+                        lines.append("**Template:** Two Column\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        lines.append("- **Column 1:**")
+                        lines.append("  - Heading: [ ]")
+                        lines.append("  - Content: [ ]")
+                        lines.append("- **Column 2:**")
+                        lines.append("  - Heading: [ ]")
+                        lines.append("  - Content: [ ]")
+                        if "image" in layout:
+                            lines.append("- **Image:** [1000px wide]")
+                    
+                    elif "three_column" in layout:
+                        lines.append("**Template:** Three Column\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        for col in range(1, 4):
+                            lines.append(f"- **Column {col}:**")
+                            lines.append("  - Heading: [ ]")
+                            lines.append("  - Content: [ ]")
+                    
+                    elif "four_column" in layout:
+                        lines.append("**Template:** Four Column\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        for col in range(1, 5):
+                            lines.append(f"- **Column {col}:**")
+                            lines.append("  - Icon: [ ]")
+                            lines.append("  - Label: [ ]")
+                            lines.append("  - Value: [ ]")
+                    
+                    elif layout == "gallery":
+                        lines.append("**Template:** Gallery\n")
+                        lines.append(f"- **Section Heading:** {heading}")
+                        images = section.get("images", [])
+                        img_count = len(images) if images else 6
+                        lines.append(f"- **Images:** {img_count} slots")
+                    
+                    else:  # single_column or unknown
+                        lines.append("**Template:** Single Column\n")
+                        lines.append(f"- **H2:** {heading}")
+                        if subheading:
+                            lines.append(f"- **H3:** {subheading}")
+                        lines.append("- **Body Text:** [ ]")
+                        if has_image:
+                            lines.append("- **Image:** [1200px wide]")
+                    
+                    lines.append("")
+            
+            lines.append("\n---\n")
+        
+        return "\n".join(lines)
+    
     def to_structured_markdown(self):
         """Export with detailed layout annotations per section"""
         lines = [
@@ -1026,7 +1217,7 @@ if st.session_state.results:
     
     # Export options
     st.subheader("Export")
-    export_col1, export_col2, export_col3 = st.columns(3)
+    export_col1, export_col2, export_col3, export_col4 = st.columns(4)
     
     with export_col1:
         markdown_content = st.session_state.scraper.to_markdown()
@@ -1049,6 +1240,16 @@ if st.session_state.results:
         )
     
     with export_col3:
+        structure_only = st.session_state.scraper.to_structure_only()
+        st.download_button(
+            label="🏗️ Structure Only",
+            data=structure_only,
+            file_name=f"scraped_{urlparse(url).netloc}_structure.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    
+    with export_col4:
         json_content = st.session_state.scraper.to_json()
         st.download_button(
             label="🔧 JSON",
