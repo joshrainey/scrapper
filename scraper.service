@@ -1,0 +1,27 @@
+[Unit]
+Description=Web Scraper Streamlit Application
+After=network.target
+
+[Service]
+Type=simple
+User=scraper
+Group=scraper
+WorkingDirectory=/opt/scraper
+Environment="PATH=/opt/scraper/venv/bin"
+ExecStart=/opt/scraper/venv/bin/streamlit run scraper_app.py --server.port=8501 --server.address=127.0.0.1 --server.headless=true --browser.gatherUsageStats=false
+Restart=always
+RestartSec=10
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/scraper
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
